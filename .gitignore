@@ -1,0 +1,11 @@
+# Build output, the packaged game folder and release zips (zips go to GitHub releases)
+build/
+dist/
+release/
+# Lab runs: screenshots, logs, savestates, backups of the game profile
+lab/
+# Savestates and logs anywhere
+savestates/
+*.gss
+*.gpu
+*.log
