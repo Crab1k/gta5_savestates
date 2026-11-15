@@ -6,7 +6,7 @@
 #include <cstdint>
 #include <string>
 
-#define SAVESTATE_VERSION "1.0.1"
+#define SAVESTATE_VERSION "1.0.2"
 
 void Log(const char* fmt, ...);
 

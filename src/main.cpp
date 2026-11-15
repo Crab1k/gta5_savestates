@@ -168,8 +168,23 @@ static DWORD WINAPI Worker(void*) {
     // As Project 1.27 does (the launcher passes its setting): GTA5.exe at high priority, 5 s after the start.
     wchar_t high[4] = {};
     ULONGLONG raiseAt = GetEnvironmentVariableW(L"GTA5SS_HIGH_PRIORITY", high, 4) && high[0] == L'1' ? GetTickCount64() + 5000 : 0;
+    unsigned swapEpoch = d3d::SwapEpoch();
     for (;;) {
         Sleep(15);
+        // The game switched between fullscreen and a window or changed resolution: the savestates made before go.
+        const unsigned epoch = d3d::SwapEpoch();
+        std::vector<int> lost;
+        if (epoch != swapEpoch && ss::DropStale(&lost)) {
+            swapEpoch = epoch;
+            if (!lost.empty()) {
+                std::string list;
+                for (size_t i = 0; i < lost.size(); i++)
+                    list += (i ? (i + 1 == lost.size() ? " and " : ", ") : "") + std::to_string(lost[i] + 1);
+                Say((lost.size() > 1 ? "Savestates " : "Savestate ") + list +
+                        " deleted: savestates don't last through a switch between fullscreen and a window or a change of resolution",
+                    false);
+            }
+        }
         if (raiseAt && GetTickCount64() > raiseAt) {
             raiseAt = 0;
             Log("high priority: %s", SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS) ? "set" : "could not be set");

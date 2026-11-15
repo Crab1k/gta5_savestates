@@ -200,7 +200,23 @@ frame below the saved region with _alloca).
   affinity on PlayGTAV.exe before it runs (GTA5.exe inherits it) and the DLL raises the priority. The log now records
   the system and each game thread (all ask 16-512 KB of stack on this PC: the stack-size theory is out). Our test:
   12 CPU threads, mask FFF, priority set, save/load fine.
+- 1.0.2 (2026-11-15): a report that the game crashed going from fullscreen to windowed. Every savestate pinned the
+  game's views of the swap-chain back buffer (an SRV and an RTV), so IDXGISwapChain::ResizeBuffers failed with
+  DXGI_ERROR_INVALID_CALL and the game read a null back buffer. Hooks on ResizeBuffers, SetFullscreenState and GetBuffer
+  (vtable 13/10/9) log every switch, plus the life of the back-buffer views. Approaches tried:
+  - Not pinning the views: switches work, but Alt+Tab out of fullscreen and back (SetFullscreenState with no
+    ResizeBuffers) makes GTA re-create its views on the same buffer, and older savestates lose theirs.
+  - Rewriting an older savestate's pointers to the new buffer and views: the load works, but at the next switch the
+    game doesn't release its views, ResizeBuffers fails and the game crashes (lab\crash_switch_after_remap*.log).
+  Kept: views are pinned as before. Right before ResizeBuffers, the hook makes savestates let go of the views of the
+  current buffers (UnpinBufferViews) and bumps an epoch. The worker then drops and deletes the savestates made before
+  (ss::DropStale), with a message. Other DLLs' bound views of the back buffer stay out of Capture::bound. Logging trap:
+  when the resolution changes, GTA rebuilds its render targets on worker threads, and they reuse freed back-buffer
+  addresses. Tested: Alt+Tab keeps savestates loadable, Alt+Enter deletes them, about 20 switches and 14 loads with no
+  crash.
 ## Limits (now)
+- A switch between fullscreen and a window, or a resolution change (ResizeBuffers), deletes the savestates made
+  before it. Alt+Tab keeps them.
 - Savestates last until the game is closed (deleted at the next start). Loading them in a later session works in
   free roam and some missions but crashed the AMD driver in the Prologue; that path is lab-only (OtherSessions=1).
 - Render targets and dynamic resources start empty after a cross-session load (the game redraws them); a pointer the

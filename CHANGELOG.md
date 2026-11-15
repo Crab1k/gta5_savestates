@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.2 (2026-11-15)
+- Fixed the game crashing when it switches from fullscreen to a window (or changes resolution) after a savestate was
+  made: savestates now let go of the game's back buffer right before the switch replaces it.
+- Such a switch deletes the savestates made before it, with a message: loading one into the rebuilt picture made the
+  next switch fail. Savestates made after the switch work as usual; Alt+Tab out of fullscreen and back keeps them.
+- The log records each display mode switch and the game's views of its back buffer.
+
 ## 1.0.1 (2026-11-12)
 - Fixed ERR_SYS_THREAD at start-up on CPUs with many threads: the game now starts the way Project 1.27's Launch button
   starts it, with P127's settings: CPU limit to the first 4-16 threads ("core fix"), language, crash/stutter/audio fix

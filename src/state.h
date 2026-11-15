@@ -15,6 +15,9 @@ void SetForceRecreate(bool on);   // lab: every load rebuilds kernel and GPU obj
 void SetReleaseFirst(bool on);    // lab: a rebuild lets go of the live GPU objects before it (else after it)
 void SetLogLayout(bool on);       // lab: log the memory layout at each save
 bool Save(int slot, std::string& msg);
+// After the game switched between fullscreen and a window or changed resolution: deletes the savestates made before,
+// which can't be loaded any more (`dropped`: their slots).
+bool DropStale(std::vector<int>* dropped);
 bool Load(int slot, std::string& msg);
 // Called before a load that stops the game for a while (another session's savestate), while the game still runs.
 void SetNotice(void (*notice)(const std::string& text));

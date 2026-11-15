@@ -634,25 +634,28 @@ std::vector<Thread*> All() {
 }
 
 // Logs where a thread that didn't park is running, from its instruction pointer and code addresses on its stack.
+// The addresses are collected while it is suspended and named only after it runs again (naming allocates and takes
+// the loader lock, which the suspended thread may hold).
 static void DescribeStraggler(Thread* t) {
     if (SuspendThread(t->handle) == (DWORD)-1) return;
     CONTEXT c = {};
     c.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
-    std::string trail;
+    uintptr_t addrs[13];
+    int n = 0;
     if (GetThreadContext(t->handle, &c)) {
-        trail = Where(c.Rip);
-        int found = 0;
-        for (auto* sp = (uintptr_t*)c.Rsp; found < 12 && (uint8_t*)sp < t->stackBase && sp < (uintptr_t*)c.Rsp + 8192; sp++) {
+        addrs[n++] = c.Rip;
+        for (auto* sp = (uintptr_t*)c.Rsp; n < 13 && (uint8_t*)sp < t->stackBase && sp < (uintptr_t*)c.Rsp + 8192; sp++) {
             MEMORY_BASIC_INFORMATION mbi;
             uintptr_t v = *sp;
             if (!VirtualQuery((void*)v, &mbi, sizeof(mbi)) || mbi.Type != MEM_IMAGE ||
                 !(mbi.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE)))
                 continue;
-            trail += " < " + Where(v);
-            found++;
+            addrs[n++] = v;
         }
     }
     ResumeThread(t->handle);
+    std::string trail;
+    for (int i = 0; i < n; i++) trail += (i ? " < " : "") + Where(addrs[i]);
     Log("  thread %u did not park: %s", t->tid, trail.c_str());
 }
 

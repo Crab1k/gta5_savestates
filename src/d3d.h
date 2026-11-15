@@ -45,6 +45,12 @@ std::string OtherOwner(uint64_t p);   // "GPU object of x.dll" for an object ano
 // (what another session needs to rebuild the objects). An empty manifestPath: no contents, no manifest.
 Capture* Save(const std::string& manifestPath, const Capture* replacing);   // replacing: the slot's previous one
 std::string MemoryWarning();   // after Save: a note for the user when video memory runs short, else empty
+// The swap chain makes its buffers anew when the game switches between fullscreen and a window or changes resolution;
+// right before, savestates let go of their views of the old buffers, and those made before can't be loaded any more
+// (d3d.cpp says why).
+unsigned SwapEpoch();                          // changes with each such switch
+bool FromEarlierBuffers(const Capture* c);     // made before the last switch
+bool Loadable(const Capture* c, std::string* why);   // same session, while the game is stopped: else `why` says why
 void Load(const Capture* c);                  // same session: the pinned objects themselves
 void Drop(Capture* c);                        // the savestate is gone: unpin its objects
 bool Complete(const Capture* c);              // its manifest is written

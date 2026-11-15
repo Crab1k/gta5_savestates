@@ -37,6 +37,7 @@ static bool g_forceRecreate = false;                  // lab: loads rebuild ever
 static bool g_logLayout = false;                      // lab: log every region and thread stack at each save
 static bool g_releaseFirst = true;                    // rebuild: let go of the live objects before (else after) it
 static bool g_otherSessions = false;                  // lab: keep savestates for later game sessions (unfinished)
+static bool g_lost[MAX_SLOTS];                        // deleted at a display mode switch (DropStale)
 
 #pragma pack(push, 1)
 struct Header {
@@ -440,6 +441,32 @@ static void DropPending() {   // while parked
     for (d3d::Capture* c : g_dropLater) d3d::Drop(c);
     g_dropLater.clear();
 }
+
+bool DropStale(std::vector<int>* dropped) {
+    dropped->clear();
+    for (int i = 0; i < MAX_SLOTS; i++)
+        if (g_d3d[i] && d3d::FromEarlierBuffers(g_d3d[i])) dropped->push_back(i);
+    if (dropped->empty()) return true;
+    std::vector<d3d::Capture*> caps;
+    for (int i : *dropped) {
+        caps.push_back(g_d3d[i]);
+        g_d3d[i] = nullptr;
+        g_slotRegions[i].clear();
+        DeleteFileA(SlotPath(i).c_str());
+        DeleteFileA(ManifestPath(i).c_str());
+        g_lost[i] = true;
+    }
+    // Their GPU objects (the old buffers' textures and models): now, or at the next save or load if the game can't be
+    // stopped now (one try: the next one would stop it for up to 5 s again).
+    if (threads::ParkAll(5000, nullptr)) {
+        DropPending();
+        for (d3d::Capture* c : caps) d3d::Drop(c);
+        threads::ReleaseAll();
+    } else {
+        g_dropLater.insert(g_dropLater.end(), caps.begin(), caps.end());
+    }
+    return true;
+}
 static void WriteRegion(Writer& w, mem::Region* r, uint64_t* pageBytes) {
     mem::CollectWritten(r);
     std::vector<mem::Run> runs = mem::Committed(r);
@@ -600,6 +627,7 @@ static bool SaveImpl(int slot, std::string& msg) {
         return false;
     }
     g_slotRegions[slot] = bases;
+    g_lost[slot] = false;
     if (g_d3d[slot] || gpu) {
         // The slot's previous savestate no longer needs its objects. Releasing them may destroy them, which must
         // not happen while the render thread uses the device: park again for that.
@@ -661,6 +689,11 @@ static DWORD MapTid(DWORD old) {
 static bool LoadImpl(int slot, std::string& msg) {
     const ULONGLONG t0 = GetTickCount64();
     const std::string path = SlotPath(slot);
+    if (g_lost[slot]) {
+        msg = "it was deleted when the game switched between fullscreen and a window (or changed resolution); "
+              "savestates don't last through such a switch";
+        return false;
+    }
     HANDLE f = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
     if (f == INVALID_HANDLE_VALUE) {
         char b[64];
@@ -809,6 +842,17 @@ static bool LoadImpl(int slot, std::string& msg) {
     }
     const ULONGLONG tParked = GetTickCount64();
     DropPending();
+    // The swap chain may have made its buffers anew since the save (another resolution, fullscreen or a window):
+    // checked now that the game is stopped, before its memory is replaced.
+    if (!foreignSession) {
+        std::string why;
+        if (!d3d::Loadable(g_d3d[slot], &why)) {
+            threads::ReleaseAll();
+            audio::Start();
+            msg = why;
+            return false;
+        }
+    }
     for (SavedThread* st : toSpawn) {
         st->live = threads::Spawn(st->rec.ordinal);
         if (!st->live || (uint64_t)st->live->stackBase != st->rec.stackBase) {
@@ -1005,7 +1049,7 @@ std::string Describe(int slot) {
     char b[200];
     WIN32_FILE_ATTRIBUTE_DATA a;
     if (!GetFileAttributesExA(SlotPath(slot).c_str(), GetFileExInfoStandard, &a)) {
-        sprintf_s(b, "Savestate slot %d (empty)", slot + 1);
+        sprintf_s(b, g_lost[slot] ? "Savestate slot %d (empty: deleted at a display mode switch)" : "Savestate slot %d (empty)", slot + 1);
         return b;
     }
     FILETIME local;

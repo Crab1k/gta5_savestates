@@ -46,6 +46,68 @@ static ID3D11DeviceContext* g_ctx = nullptr;
 static IDXGISwapChain* g_swap = nullptr;
 static volatile LONG g_created = 0, g_destroyed = 0;
 
+// ------------------------------------------------------------------ the swap chain's buffers
+// A savestate pins the game's views of the swap chain's buffers like every other object: GTA makes new views of the same
+// buffers when it comes back to fullscreen after Alt+Tab, and a savestate from before must still find its own. But the
+// swap chain makes its buffers anew (ResizeBuffers: another resolution, fullscreen or a window) only once nothing refers
+// to them, and a pinned view would make that fail, which ends the game. So right before ResizeBuffers the savestates let
+// go of those views (UnpinBufferViews), and the savestates made before can't be loaded any more: they are deleted
+// (ss::DropStale). Rewriting a savestate's pointers to the old buffers and views was tried: the load works, but at the
+// next switch GTA no longer lets go of its views (it keeps more about its back buffer than those pointers).
+static volatile LONG g_swapEpoch = 0;   // changes each time savestates let go of their views of the buffers
+
+// The swap chain's buffers now (as the game got them since they were last made), for the log: the game's views of them
+// are logged as they come and go.
+static volatile LONG64 g_current[16];
+static bool CurrentBuffer(uint64_t p) {
+    if (!p) return false;
+    for (auto& b : g_current)
+        if ((uint64_t)b == p) return true;
+    return false;
+}
+static void NoteBuffer(uint64_t p) {
+    if (!p || CurrentBuffer(p)) return;
+    for (auto& b : g_current)
+        if (!b && InterlockedCompareExchange64(&b, (LONG64)p, 0) == 0) return;
+}
+static void ForgetBuffers() {
+    for (auto& b : g_current) InterlockedExchange64(&b, 0);
+}
+static bool BufferView(uint8_t kind, ID3D11DeviceChild* parent) {
+    return kind >= K_SRV && kind <= K_DSV && CurrentBuffer((uint64_t)parent);
+}
+
+struct SwapInfo {
+    UINT width = 0, height = 0, count = 0;
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+    BOOL fullscreen = FALSE;
+    std::vector<uint64_t> buffers;   // GetBuffer(i), 0 where not accessible; no reference kept
+};
+
+static SwapInfo CurrentSwap(bool withBuffers) {
+    SwapInfo s;
+    DXGI_SWAP_CHAIN_DESC d;
+    if (!g_swap || FAILED(g_swap->GetDesc(&d))) return s;
+    s.width = d.BufferDesc.Width;
+    s.height = d.BufferDesc.Height;
+    s.count = d.BufferCount;
+    s.format = d.BufferDesc.Format;
+    if (FAILED(g_swap->GetFullscreenState(&s.fullscreen, nullptr))) s.fullscreen = !d.Windowed;
+    for (UINT i = 0; withBuffers && i < (d.BufferCount ? d.BufferCount : 1) && i < 16; i++) {
+        ID3D11Texture2D* b = nullptr;
+        s.buffers.push_back(SUCCEEDED(g_swap->GetBuffer(i, __uuidof(ID3D11Texture2D), (void**)&b)) && b ? (uint64_t)b : 0);
+        NoteBuffer(s.buffers.back());
+        if (b) b->Release();
+    }
+    return s;
+}
+
+static std::string ModeName(const SwapInfo& s) {
+    char b[80];
+    sprintf_s(b, "%s at %ux%u", s.fullscreen ? "fullscreen" : "a window", s.width, s.height);
+    return b;
+}
+
 // {6E2C1F0A-5B3D-4A8E-9C47-2D1F5A6B7C80}
 static const GUID kSentinelGuid = {0x6e2c1f0a, 0x5b3d, 0x4a8e, {0x9c, 0x47, 0x2d, 0x1f, 0x5a, 0x6b, 0x7c, 0x80}};
 
@@ -64,8 +126,11 @@ struct Sentinel final : IUnknown {
         if (r == 0) {
             // The runtime let go of its private data: the object is being destroyed.
             AcquireSRWLockExclusive(&g_lock);
-            g_objs->erase(obj);
+            auto it = g_objs->find(obj);
+            const bool bufferView = it != g_objs->end() && BufferView(it->second.kind, it->second.parent);
+            if (it != g_objs->end()) g_objs->erase(it);
             ReleaseSRWLockExclusive(&g_lock);
+            if (bufferView) Log("d3d: view %p of the back buffer destroyed (thread %u)", obj, GetCurrentThreadId());
             InterlockedIncrement(&g_destroyed);
             delete this;
         }
@@ -253,6 +318,15 @@ TEXTURE(2, D3D11_TEXTURE2D_DESC)
 TEXTURE(3, D3D11_TEXTURE3D_DESC)
 #undef TEXTURE
 
+// The log: the game made a view of a swap chain buffer.
+static void NoteView(void* caller, ID3D11DeviceChild* o, ID3D11Resource* r, uint8_t kind) {
+    if (t_own || !g_exe.Contains((uintptr_t)caller) || !CurrentBuffer((uint64_t)r)) return;
+    ULONG refs = o->AddRef() - 1;
+    o->Release();
+    Log("d3d: view %p (kind %u) of the back buffer %p made, %u references (thread %u)", o, kind, r, (unsigned)refs,
+        GetCurrentThreadId());
+}
+
 #define VIEW(Name, K, Desc, Out)                                                                                    \
     REAL(Create##Name, (Dev*, ID3D11Resource*, const Desc*, Out**))                                                \
     static HRESULT STDMETHODCALLTYPE Hook_Create##Name(Dev* d, ID3D11Resource* r, const Desc* a, Out** o) {        \
@@ -262,6 +336,7 @@ TEXTURE(3, D3D11_TEXTURE3D_DESC)
             t.flags = a ? F_Desc : 0;                                                                              \
             t.parent = r;                                                                                          \
             Track(_ReturnAddress(), *o, std::move(t));                                                                               \
+            NoteView(_ReturnAddress(), *o, r, K);                                                                  \
         }                                                                                                          \
         return hr;                                                                                                 \
     }
@@ -361,6 +436,71 @@ static void HookDevice(ID3D11Device* dev) {
 #undef P
 }
 
+static bool IsView(uint8_t kind) { return kind >= K_SRV && kind <= K_DSV; }
+
+// Is `p` (any Direct3D object) a view of one of `buffers`?
+static bool ViewOfBuffer(IUnknown* p, const std::unordered_map<uint64_t, uint32_t>& buffers) {
+    if (buffers.empty()) return false;
+    ID3D11View* v = nullptr;
+    if (FAILED(p->QueryInterface(__uuidof(ID3D11View), (void**)&v)) || !v) return false;
+    ID3D11Resource* r = nullptr;
+    v->GetResource(&r);
+    const bool yes = r && buffers.count((uint64_t)r) != 0;
+    if (r) r->Release();
+    v->Release();
+    return yes;
+}
+
+// The game's views of the swap chain's buffers that are alive now, with their references (the log).
+static int LogBufferViews(const char* when) {
+    std::vector<std::pair<ID3D11DeviceChild*, uint32_t>> views;
+    AcquireSRWLockShared(&g_lock);
+    for (auto& kv : *g_objs)
+        if (BufferView(kv.second.kind, kv.second.parent)) views.push_back({kv.first, kv.second.pins});
+    ReleaseSRWLockShared(&g_lock);
+    for (auto& [o, pins] : views) {
+        ULONG refs = o->AddRef() - 1;
+        o->Release();
+        Log("d3d:   %s: view %p of the back buffer alive, %u references, %u of them savestates'", when, o, (unsigned)refs, pins);
+    }
+    return (int)views.size();
+}
+
+static HRESULT(STDMETHODCALLTYPE* RealGetBuffer)(IDXGISwapChain*, UINT, REFIID, void**);
+static int UnpinBufferViews(IDXGISwapChain* sc);   // after Capture
+
+static HRESULT(STDMETHODCALLTYPE* RealResizeBuffers)(IDXGISwapChain*, UINT, UINT, UINT, DXGI_FORMAT, UINT);
+static HRESULT STDMETHODCALLTYPE Hook_ResizeBuffers(IDXGISwapChain* sc, UINT n, UINT w, UINT h, DXGI_FORMAT f, UINT flags) {
+    if (sc != g_swap) return RealResizeBuffers(sc, n, w, h, f, flags);
+    Log("d3d: the game makes the swap chain buffers anew (%ux%u, thread %u)", w, h, GetCurrentThreadId());
+    const int unpinned = UnpinBufferViews(sc);
+    LogBufferViews("before");
+    HRESULT hr = RealResizeBuffers(sc, n, w, h, f, flags);
+    if (SUCCEEDED(hr)) ForgetBuffers();
+    if (SUCCEEDED(hr) || unpinned) InterlockedIncrement(&g_swapEpoch);
+    Log("d3d: swap chain buffers made anew, %s: %s (%08X)", ModeName(CurrentSwap(false)).c_str(),
+        SUCCEEDED(hr) ? "done" : "failed", (unsigned)hr);
+    return hr;
+}
+
+static HRESULT(STDMETHODCALLTYPE* RealSetFullscreenState)(IDXGISwapChain*, BOOL, IDXGIOutput*);
+static HRESULT STDMETHODCALLTYPE Hook_SetFullscreenState(IDXGISwapChain* sc, BOOL on, IDXGIOutput* out) {
+    HRESULT hr = RealSetFullscreenState(sc, on, out);
+    if (sc == g_swap)
+        Log("d3d: the game switches to %s: %s (%08X, thread %u)", on ? "fullscreen" : "a window", SUCCEEDED(hr) ? "done" : "failed",
+            (unsigned)hr, GetCurrentThreadId());
+    return hr;
+}
+
+static HRESULT STDMETHODCALLTYPE Hook_GetBuffer(IDXGISwapChain* sc, UINT i, REFIID iid, void** out) {
+    HRESULT hr = RealGetBuffer(sc, i, iid, out);
+    if (sc == g_swap && SUCCEEDED(hr) && out && *out && g_exe.Contains((uintptr_t)_ReturnAddress())) {
+        if (!CurrentBuffer((uint64_t)*out)) Log("d3d: the game got back buffer %u: %p (thread %u)", i, *out, GetCurrentThreadId());
+        NoteBuffer((uint64_t)*out);
+    }
+    return hr;
+}
+
 static decltype(&D3D11CreateDeviceAndSwapChain) RealCreateDeviceAndSwapChain;
 static decltype(&D3D11CreateDevice) RealCreateDevice;
 
@@ -373,7 +513,13 @@ static HRESULT WINAPI Hook_D3D11CreateDeviceAndSwapChain(IDXGIAdapter* a, D3D_DR
         g_dev = *dev;
         g_swap = sc ? *sc : nullptr;
         (*dev)->GetImmediateContext(&g_ctx);   // keeps one reference for our lifetime
-        if (g_swap) overlay::Install(g_swap, *dev);
+        if (g_swap) {
+            void** sv = *(void***)g_swap;
+            if (auto old = Patch(sv, 13, &Hook_ResizeBuffers)) RealResizeBuffers = old;
+            if (auto old = Patch(sv, 10, &Hook_SetFullscreenState)) RealSetFullscreenState = old;
+            if (auto old = Patch(sv, 9, &Hook_GetBuffer)) RealGetBuffer = old;
+            overlay::Install(g_swap, *dev);
+        }
         Log("d3d: device %p, immediate context %p, swap chain %p (%ux%u)", *dev, g_ctx, g_swap,
             scd ? scd->BufferDesc.Width : 0, scd ? scd->BufferDesc.Height : 0);
     }
@@ -429,7 +575,8 @@ bool Tracks(uint64_t p) {
 ID3D11DeviceContext* Context() { return g_ctx; }
 
 // ------------------------------------------------------------------ pipeline state of the immediate context
-// Raw pointers only: every bound object is tracked and pinned by the same capture, so it stays alive.
+// Raw pointers only: every bound object is pinned by the same capture (or held in its `bound` list), so it stays alive
+// (views of the back buffer only until it is made anew, after which the capture can't be loaded: UnpinBufferViews).
 struct StageState {
     IUnknown* shader = nullptr;
     ID3D11Buffer* cb[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT] = {};
@@ -852,6 +999,10 @@ struct Capture {
     // Contents the game changes in place (resources it updates, dynamic textures), as they were: copies on the GPU,
     // and staging copies of dynamic textures. A load in this session copies them back.
     std::vector<std::pair<ID3D11Resource*, ID3D11Resource*>> kept, keptDynamic;
+    // The swap chain's buffers then; buffersGone: it let go of its views of them for ResizeBuffers (see UnpinBufferViews).
+    SwapInfo swapInfo;
+    LONG swapEpoch = 0;
+    bool buffersGone = false;
     ContextState state;
     // For another session (the manifest).
     std::vector<Entry> entries;
@@ -862,6 +1013,61 @@ struct Capture {
 
 static std::mutex g_capLock;
 static std::vector<Capture*>* g_unwritten;   // captures whose manifest isn't written yet
+
+// Every savestate's capture, for UnpinBufferViews (which runs on the game's thread that calls ResizeBuffers: never
+// while Save, Load or Drop run, as those stop that thread first).
+static SRWLOCK g_capsLock = SRWLOCK_INIT;
+static std::vector<Capture*> g_captures;
+
+static int UnpinBufferViews(IDXGISwapChain* sc) {
+    std::unordered_set<uint64_t> bufs;
+    DXGI_SWAP_CHAIN_DESC d;
+    const UINT n = SUCCEEDED(sc->GetDesc(&d)) && d.BufferCount ? d.BufferCount : 1;
+    for (UINT i = 0; i < n && i < 16; i++) {
+        ID3D11Texture2D* b = nullptr;
+        if (SUCCEEDED(RealGetBuffer(sc, i, __uuidof(ID3D11Texture2D), (void**)&b)) && b) {
+            bufs.insert((uint64_t)b);
+            b->Release();
+        }
+    }
+    // The game's views of them (alive: a savestate or the game still holds them).
+    std::unordered_set<ID3D11DeviceChild*> views;
+    AcquireSRWLockShared(&g_lock);
+    for (auto& kv : *g_objs)
+        if (IsView(kv.second.kind) && kv.second.parent && bufs.count((uint64_t)kv.second.parent)) views.insert(kv.first);
+    ReleaseSRWLockShared(&g_lock);
+    if (views.empty()) return 0;
+    std::vector<ID3D11DeviceChild*> release;
+    int savestates = 0;
+    AcquireSRWLockExclusive(&g_capsLock);
+    for (Capture* c : g_captures) {
+        const size_t before = c->objs.size();
+        for (size_t i = 0; i < c->objs.size();) {
+            if (views.count(c->objs[i].first)) {
+                release.push_back(c->objs[i].first);
+                c->objs.erase(c->objs.begin() + i);
+            } else {
+                i++;
+            }
+        }
+        if (c->objs.size() != before) {
+            c->buffersGone = true;
+            savestates++;
+        }
+    }
+    ReleaseSRWLockExclusive(&g_capsLock);
+    for (ID3D11DeviceChild* o : release) {
+        AcquireSRWLockExclusive(&g_lock);
+        auto it = g_objs->find(o);
+        if (it != g_objs->end() && it->second.pins) it->second.pins--;
+        ReleaseSRWLockExclusive(&g_lock);
+        o->Release();   // may destroy it (its sentinel takes g_lock)
+    }
+    if (savestates)
+        Log("d3d: %d savestates let go of %u references to views of the back buffer (they can't be loaded any more)",
+            savestates, (unsigned)release.size());
+    return savestates;
+}
 
 Capture* Save(const std::string& manifestPath, const Capture* replacing) {
     if (!g_ctx) return nullptr;
@@ -882,6 +1088,11 @@ Capture* Save(const std::string& manifestPath, const Capture* replacing) {
             bb->Release();
         }
     }
+    c->swapInfo = CurrentSwap(true);
+    c->swapEpoch = g_swapEpoch;
+    std::unordered_map<uint64_t, uint32_t> bufferIndex;
+    for (uint32_t i = 0; i < (uint32_t)c->swapInfo.buffers.size(); i++)
+        if (c->swapInfo.buffers[i]) bufferIndex.emplace(c->swapInfo.buffers[i], i);
     // Only what the game uses: objects it holds references to, objects bound to the pipeline, and the resources and
     // class linkages those depend on. Objects alive only because an older savestate pins them stay out.
     std::vector<std::pair<ID3D11DeviceChild*, ID3D11DeviceChild*>> all;   // object, parent
@@ -902,12 +1113,19 @@ Capture* Save(const std::string& manifestPath, const Capture* replacing) {
         if (game > 0) used.insert(all[i].first);
     }
     GetState(g_ctx, c->state);
+    int otherBufferViews = 0;
     AcquireSRWLockShared(&g_lock);
     ForEachPointer(c->state, [&](void* p) -> void* {
         if (!p) return p;
         used.insert((ID3D11DeviceChild*)p);
         // Not the game's (ShadowLib, TXAA...): not pinned below, but a load binds it again, so it must stay alive.
+        // Except another DLL's view of the back buffer (an overlay's): keeping it would stop the swap chain from
+        // making its buffers anew, so a load leaves that slot empty.
         if (!g_objs->count((ID3D11DeviceChild*)p)) {
+            if (ViewOfBuffer((IUnknown*)p, bufferIndex)) {
+                otherBufferViews++;
+                return nullptr;
+            }
             ((IUnknown*)p)->AddRef();
             c->bound.push_back((IUnknown*)p);
         }
@@ -928,8 +1146,12 @@ Capture* Save(const std::string& manifestPath, const Capture* replacing) {
         (others > 0 ? heldBytes : freedSoon) += BytesOf((ID3D11Resource*)all[i].first);
     }
     std::vector<ID3D11DeviceChild*> live;
-    for (auto& [o, parent] : all)
-        if (used.count(o)) live.push_back(o);
+    int bufferViews = 0;   // the game's views of the swap chain's buffers among them (the log)
+    for (size_t i = 0; i < all.size(); i++) {
+        if (!used.count(all[i].first)) continue;
+        live.push_back(all[i].first);
+        if (IsView(kinds[i]) && all[i].second && bufferIndex.count((uint64_t)all[i].second)) bufferViews++;
+    }
     c->objs.reserve(live.size());
     c->entries.reserve(live.size());
     std::vector<std::pair<ID3D11DeviceChild*, size_t>> snapshots, immutables;
@@ -1017,8 +1239,13 @@ Capture* Save(const std::string& manifestPath, const Capture* replacing) {
         std::lock_guard<std::mutex> l(g_capLock);
         g_unwritten->push_back(c);
     }
+    AcquireSRWLockExclusive(&g_capsLock);
+    g_captures.push_back(c);
+    ReleaseSRWLockExclusive(&g_capsLock);
     Log("d3d: %u objects pinned (%d created, %d destroyed so far); %u to copy, %u to read back", (unsigned)c->objs.size(),
         (int)g_created, (int)g_destroyed, (unsigned)snapshots.size(), (unsigned)immutables.size());
+    Log("d3d: display %s; %d views of the back buffer among them%s", ModeName(c->swapInfo).c_str(), bufferViews,
+        otherBufferViews ? " (another DLL's bound one left out)" : "");
     std::string others;
     AcquireSRWLockShared(&g_otherLock);
     for (auto& [m, n] : g_otherCreators) {
@@ -1079,6 +1306,23 @@ void FinishManifests() {
 
 bool Complete(const Capture* c) { return c && c->written; }
 
+unsigned SwapEpoch() { return (unsigned)g_swapEpoch; }
+
+bool FromEarlierBuffers(const Capture* c) {
+    if (!c) return false;
+    AcquireSRWLockShared(&g_capsLock);
+    const bool gone = c->buffersGone;
+    ReleaseSRWLockShared(&g_capsLock);
+    return gone || (c->swap && c->swapEpoch != g_swapEpoch);
+}
+
+bool Loadable(const Capture* c, std::string* why) {
+    if (!FromEarlierBuffers(c)) return true;
+    *why = "it was made before the game switched between fullscreen and a window (or changed resolution); "
+           "savestates don't last through such a switch";
+    return false;
+}
+
 void Load(const Capture* c) {
     if (!c || !g_ctx) return;
     std::unordered_map<ID3D11DeviceChild*, ULONG> want;
@@ -1113,10 +1357,14 @@ void Load(const Capture* c) {
     if (failed) Log("d3d: %d dynamic textures could not be put back", failed);
     SetState(g_ctx, c->state);
     Log("d3d: references set back on %d objects, lowered on %d (%u tracked before)", raised, lowered, (unsigned)live.size());
+    LogBufferViews("after the load");
 }
 
 void Drop(Capture* c) {
     if (!c) return;
+    AcquireSRWLockExclusive(&g_capsLock);
+    g_captures.erase(std::remove(g_captures.begin(), g_captures.end(), c), g_captures.end());
+    ReleaseSRWLockExclusive(&g_capsLock);
     {
         std::lock_guard<std::mutex> l(g_capLock);
         if (g_unwritten) {

@@ -1,4 +1,4 @@
-# GTA V savestates (1.27) — version 1.0.1
+# GTA V savestates (1.27) — version 1.0.2
 
 Full savestates for GTA V **1.27** (GTA5.exe 1.0.372.2, as installed by Project 1.27), like snapshots of a virtual
 machine. Save anywhere, including in the middle of a mission, a cutscene or a chase, and jump back to that exact
@@ -57,6 +57,8 @@ To uninstall, delete the folder. Nothing was installed anywhere else, and the ga
 - **"the game didn't stop in time"**: a game thread was busy (loading screens); try again a moment later.
 - **"not enough memory (RAM and page file)"**: close other programs or enlarge the page file; nothing was saved.
 - **"it was made in an earlier game session"**: savestates don't survive a restart of the game.
+- **"Savestate 1 deleted: savestates don't last through a switch between fullscreen and a window..."**: see Things
+  to know below.
 - **Crashes or other problems**: `savestate.log` (and `savestate.prev.log` after a restart) says what happened last;
   include it when you report a problem.
 
@@ -75,6 +77,10 @@ any of the game's code runs. Nothing is written to the game folder, and the ASI 
 - If the game can't be stopped within 5 seconds (it happens very rarely), nothing is saved or loaded and the message
   says so.
 - Each savestate keeps the textures and models that were loaded when it was made (see Video memory above).
+- Switching between fullscreen and a window (Alt+Enter or the Graphics settings) or changing the resolution deletes
+  the savestates made before it, with a message: the game builds its picture anew then, and a savestate from before
+  can't be loaded into that safely. Savestates made after the switch work as usual. Alt+Tab out of fullscreen and
+  back keeps them.
 
 - Other mods that keep their own state (trainers, scripts) are not rolled back by a load.
 
