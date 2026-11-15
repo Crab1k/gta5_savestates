@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.3 (2026-11-15)
+- New default keys: F9 save, F10 / F11 previous / next slot, F12 load.
+- `savestate.ini` takes key names (`SaveKey=F9`, `LoadKey=Insert`, `Mouse4`, ...) as well as key codes, and the README
+  explains how to change the keys. `savestate.log` lists the keys in use, and a name it doesn't know.
+- If you keep the `savestate.ini` of an earlier version, it still sets the old keys (F5 / F9 / F6 / F7): replace it
+  with the new one, or change the keys in it.
+
 ## 1.0.2 (2026-11-15)
 - Fixed the game crashing when it switches from fullscreen to a window (or changes resolution) after a savestate was
   made: savestates now let go of the game's back buffer right before the switch replaces it.

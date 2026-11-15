@@ -1,4 +1,4 @@
-# GTA V savestates (1.27) — version 1.0.2
+# GTA V savestates (1.27) — version 1.0.3
 
 Full savestates for GTA V **1.27** (GTA5.exe 1.0.372.2, as installed by Project 1.27), like snapshots of a virtual
 machine. Save anywhere, including in the middle of a mission, a cutscene or a chase, and jump back to that exact
@@ -11,12 +11,13 @@ have savestates; start it from Project 1.27 as usual to play the untouched game.
 
 | Key | Action |
 |---|---|
-| **F5** | save a savestate to the current slot |
-| **F9** | load the current slot |
-| **F6 / F7** | previous / next slot (10 slots) |
+| **F9** | save a savestate to the current slot |
+| **F10 / F11** | previous / next slot (10 slots) |
+| **F12** | load the current slot |
 
 A short message in the top-left corner confirms each action ("Savestate 1 saved (1.02 GB, game stopped 390 ms)").
-Saving and loading each stop the game for about 0.4 seconds. Keys can be changed in `savestate.ini`.
+Saving and loading each stop the game for about 0.4 seconds. The keys can be changed (see
+[Changing the keys](#changing-the-keys)).
 
 **Savestates last until you close the game.** The next time the game starts with `GTA5-Savestates.exe`, the previous
 session's savestates are deleted.
@@ -49,6 +50,42 @@ places add up. On cards with 2-4 GB:
    session's).
 
 To uninstall, delete the folder. Nothing was installed anywhere else, and the game folder is unchanged.
+
+## Changing the keys
+1. Close the game.
+2. Open `savestate.ini` (next to `GTA5-Savestates.exe`) in Notepad.
+3. In the `[Savestate]` section, replace the key after the `=` on these lines:
+
+   | Line | Action | Default |
+   |---|---|---|
+   | `SaveKey=` | save to the current slot | `F9` |
+   | `PrevSlotKey=` | previous slot | `F10` |
+   | `NextSlotKey=` | next slot | `F11` |
+   | `LoadKey=` | load the current slot | `F12` |
+
+   For example `SaveKey=Insert` and `LoadKey=Home`.
+4. Save the file and start the game with `GTA5-Savestates.exe` again.
+
+Key names (upper or lower case):
+
+| Keys | Names |
+|---|---|
+| function keys | `F1` ... `F24` |
+| letters and the top-row digits | `A` ... `Z`, `0` ... `9` |
+| numeric keypad | `NumPad0` ... `NumPad9`, `NumPadAdd`, `NumPadSubtract`, `NumPadMultiply`, `NumPadDivide`, `NumPadDecimal` |
+| editing and arrows | `Insert`, `Delete`, `Home`, `End`, `PageUp`, `PageDown`, `Up`, `Down`, `Left`, `Right` |
+| others | `Pause`, `ScrollLock`, `Backspace`, `Tab`, `Enter`, `Space`, `Minus`, `Equals`, `Comma`, `Period`, `Semicolon`, `Slash`, `Backquote`, `LeftBracket`, `Backslash`, `RightBracket`, `Quote` |
+| mouse | `MouseMiddle`, `Mouse4`, `Mouse5` (the side buttons) |
+
+A Windows virtual-key code works too (`120` or `0x78` is F9), for keys not in the list. Leave a line empty
+(`SaveKey=`) for its default.
+
+- Pick keys the game doesn't use for something else (its key bindings are in Settings): a key does both.
+- The keys only work while the game window is in front.
+- `savestate.log` shows the keys in use at the start ("keys: save F9, load F12, ..."). A name it doesn't know is
+  noted there, and the default is used instead.
+- With the Steam version of the game, F12 also takes a Steam screenshot. Use another `LoadKey`, or change Steam's
+  screenshot key, if that bothers you.
 
 ## Troubleshooting
 - **ERR_SYS_THREAD at start-up**: GTA V 1.27 can't handle CPUs with many threads. The launcher limits it to the first 4-16

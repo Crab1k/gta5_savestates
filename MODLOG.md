@@ -214,6 +214,8 @@ frame below the saved region with _alloca).
   when the resolution changes, GTA rebuilds its render targets on worker threads, and they reuse freed back-buffer
   addresses. Tested: Alt+Tab keeps savestates loadable, Alt+Enter deletes them, about 20 switches and 14 loads with no
   crash.
+- 1.0.3: the default keys are F9 save, F10/F11 slot, F12 load (at the user's request). savestate.ini takes key names
+  (main.cpp KeyFromName), and the log lists the keys in use.
 ## Limits (now)
 - A switch between fullscreen and a window, or a resolution change (ResizeBuffers), deletes the savestates made
   before it. Alt+Tab keeps them.

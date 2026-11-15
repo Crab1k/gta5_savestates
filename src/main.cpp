@@ -1,5 +1,5 @@
 ﻿// savestate.dll: full savestates for GTA V 1.27 (loaded by GTA5-Savestates.exe).
-//   F5 save to the current slot, F9 load it, F6/F7 previous/next slot (savestate.ini to change keys).
+//   F9 save to the current slot, F12 load it, F10/F11 previous/next slot (savestate.ini to change keys).
 // Inside PlayGTAV.exe (the starter) the same DLL only makes sure it is loaded into GTA5.exe too (spawn.h).
 #include "addr.h"
 #include "audio.h"
@@ -15,6 +15,7 @@
 #include "state.h"
 #include "threads.h"
 #include "timewarp.h"
+#include <cctype>
 #include <cstdarg>
 #include <intrin.h>
 #include <cstdio>
@@ -138,6 +139,67 @@ static void Notice(const std::string& s) {
 // ------------------------------------------------------------------ hotkeys
 static int g_keySave, g_keyLoad, g_keyPrev, g_keyNext, g_slot = 0;
 static bool g_down[256];
+
+// Key names savestate.ini may use (besides F1-F24, A-Z, 0-9 and NumPad0-NumPad9), as README.md lists them.
+struct KeyName {
+    const char* name;
+    int vk;
+};
+static const KeyName kKeyNames[] = {
+    {"Insert", VK_INSERT}, {"Delete", VK_DELETE}, {"Home", VK_HOME}, {"End", VK_END}, {"PageUp", VK_PRIOR},
+    {"PageDown", VK_NEXT}, {"Up", VK_UP}, {"Down", VK_DOWN}, {"Left", VK_LEFT}, {"Right", VK_RIGHT},
+    {"Pause", VK_PAUSE}, {"ScrollLock", VK_SCROLL}, {"Backspace", VK_BACK}, {"Tab", VK_TAB}, {"Enter", VK_RETURN},
+    {"Space", VK_SPACE}, {"NumPadAdd", VK_ADD}, {"NumPadSubtract", VK_SUBTRACT}, {"NumPadMultiply", VK_MULTIPLY},
+    {"NumPadDivide", VK_DIVIDE}, {"NumPadDecimal", VK_DECIMAL}, {"Minus", VK_OEM_MINUS}, {"Equals", VK_OEM_PLUS},
+    {"Comma", VK_OEM_COMMA}, {"Period", VK_OEM_PERIOD}, {"Semicolon", VK_OEM_1}, {"Slash", VK_OEM_2},
+    {"Backquote", VK_OEM_3}, {"LeftBracket", VK_OEM_4}, {"Backslash", VK_OEM_5}, {"RightBracket", VK_OEM_6},
+    {"Quote", VK_OEM_7}, {"MouseMiddle", VK_MBUTTON}, {"Mouse4", VK_XBUTTON1}, {"Mouse5", VK_XBUTTON2},
+};
+
+// "F9", "numpad5", "X", "Mouse4" ... or a virtual-key code ("120", "0x78"); 0 if it is none of them.
+static int KeyFromName(std::string s) {
+    while (!s.empty() && isspace((unsigned char)s.back())) s.pop_back();
+    while (!s.empty() && isspace((unsigned char)s.front())) s.erase(0, 1);
+    if (s.empty()) return 0;
+    if (s.size() == 1 && isalnum((unsigned char)s[0])) return toupper((unsigned char)s[0]);   // A-Z, 0-9
+    auto number = [](const std::string& t, int base) {
+        char* end = nullptr;
+        long v = strtol(t.c_str(), &end, base);
+        return end && !*end && v > 0 && v < 256 ? (int)v : 0;
+    };
+    if (s.size() > 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) return number(s.substr(2), 16);
+    if (isdigit((unsigned char)s[0])) return number(s, 10);
+    if ((s[0] == 'F' || s[0] == 'f') && s.size() <= 3 && isdigit((unsigned char)s[1])) {
+        int n = number(s.substr(1), 10);
+        return n >= 1 && n <= 24 ? VK_F1 + n - 1 : 0;
+    }
+    if (s.size() == 7 && _strnicmp(s.c_str(), "NumPad", 6) == 0 && isdigit((unsigned char)s[6])) return VK_NUMPAD0 + (s[6] - '0');
+    for (const KeyName& k : kKeyNames)
+        if (_stricmp(s.c_str(), k.name) == 0) return k.vk;
+    return 0;
+}
+
+static std::string KeyLabel(int vk) {
+    if (vk >= VK_F1 && vk <= VK_F24) return "F" + std::to_string(vk - VK_F1 + 1);
+    if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9')) return std::string(1, (char)vk);
+    if (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD9) return "NumPad" + std::to_string(vk - VK_NUMPAD0);
+    for (const KeyName& k : kKeyNames)
+        if (k.vk == vk) return k.name;
+    return "key code " + std::to_string(vk);
+}
+
+// A key setting of savestate.ini; empty or missing: the default. A name it doesn't know: the default, and the log says so.
+static int IniKey(const char* setting, int def) {
+    char buf[64] = {};
+    GetPrivateProfileStringA("Savestate", setting, "", buf, sizeof(buf), g_iniPath);
+    if (!buf[0]) return def;
+    int vk = KeyFromName(buf);
+    if (!vk) {
+        Log("savestate.ini: %s=%s is not a key this program knows (see README.md); %s is used", setting, buf, KeyLabel(def).c_str());
+        return def;
+    }
+    return vk;
+}
 
 static bool Pressed(int vk) {
     bool d = (GetAsyncKeyState(vk) & 0x8000) != 0;
@@ -338,10 +400,18 @@ static void Init(HMODULE self) {
     RealGetProcAddress = (decltype(RealGetProcAddress))PatchIat(exe, "kernel32.dll", "GetProcAddress", (void*)&Hook_GetProcAddress);
     if (!RealGetProcAddress) RealGetProcAddress = &GetProcAddress;
 
-    g_keySave = IniInt("Savestate", "SaveKey", VK_F5);
-    g_keyLoad = IniInt("Savestate", "LoadKey", VK_F9);
-    g_keyPrev = IniInt("Savestate", "PrevSlotKey", VK_F6);
-    g_keyNext = IniInt("Savestate", "NextSlotKey", VK_F7);
+    g_keySave = IniKey("SaveKey", VK_F9);
+    g_keyLoad = IniKey("LoadKey", VK_F12);
+    g_keyPrev = IniKey("PrevSlotKey", VK_F10);
+    g_keyNext = IniKey("NextSlotKey", VK_F11);
+    Log("keys: save %s, load %s, previous slot %s, next slot %s", KeyLabel(g_keySave).c_str(), KeyLabel(g_keyLoad).c_str(),
+        KeyLabel(g_keyPrev).c_str(), KeyLabel(g_keyNext).c_str());
+    {
+        const int keys[] = {g_keySave, g_keyLoad, g_keyPrev, g_keyNext};
+        for (int i = 0; i < 4; i++)
+            for (int j = i + 1; j < 4; j++)
+                if (keys[i] == keys[j]) Log("savestate.ini: %s is set for two actions; it does only one of them", KeyLabel(keys[i]).c_str());
+    }
     g_showMessages = IniInt("Savestate", "ShowMessages", 1) != 0;
     g_census = IniInt("Lab", "Census", 0) != 0;
 
